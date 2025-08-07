@@ -4,6 +4,7 @@ import pandas as pd
 import os, base64
 from pathlib import Path
 
+BUS_MAP_FILE=Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
 from funktionen_app import (
     BUS_TO_HERSTELLER,
     setup_page,
