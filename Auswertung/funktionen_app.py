@@ -1,5 +1,12 @@
 # app.py
 import os
+import pandas as pd
+
+BASE_DIR=os.path.dirname(__file__)
+EXCEL_PATH = os.path.join(BASE_DIR, "bus_hersteller_zuordnung.xlsx")
+
+mapping_df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
+
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -566,7 +573,10 @@ AUTO_FEHLERKATEGORIEN = {
 
 
 # 1) Einmaliges Einlesen der Excel-Datei mit BusNr → Hersteller
-mapping_df = pd.read_excel("bus_hersteller_zuordnung.xlsx", engine="openpyxl")
+BASE_DIR=os.path.dirname(__file__)
+EXCEL_PATH = os.path.join(BASE_DIR, "bus_hersteller_zuordnung.xlsx")
+
+mapping_df = pd.read_excel(EXCEL_PATH, engine="openpyxl")
 # Passe die Überschriften an, falls deine Excel-Cols anders heißen:
 mapping_df.columns = ["BusNr", "Hersteller"]
 # Erstelle das Dict
