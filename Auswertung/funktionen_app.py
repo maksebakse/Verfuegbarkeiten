@@ -1,7 +1,7 @@
 # app.py
 import os
 import pandas as pd
-
+from pathlib import Path
 BASE_DIR=os.path.dirname(__file__)
 EXCEL_PATH = os.path.join(BASE_DIR, "bus_hersteller_zuordnung.xlsx")
 
@@ -612,7 +612,8 @@ def prepare_filtered_summary(
     # Alte Ausgabe löschen
     if os.path.exists(output_path):
         os.remove(output_path)
-
+    BUS_MAP_FILE = PATH(__file__).parent / "bus_hersteller_zuordnung.xlsx"
+    mapping_df = pd.read_excel(BUS_MAP_FILE, engine="openpyxl")
     # Zulassungs-/Verkaufs-Daten einlesen
     df_dates = pd.read_excel(date_path, sheet_name=sheet_dates, engine="openpyxl")
     df_dates.columns = df_dates.columns.str.strip()
