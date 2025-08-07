@@ -28,6 +28,13 @@ PROCESSED_PQ   = "Zusammenfassung_bearbeitet.parquet"
 BUS_MAP_FILE   = "bus_hersteller_zuordnung.xlsx"
 
 
+
+
+
+
+st.write("working dir:", os.getcwd())
+st.write("files here:", os.listdir())
+
 # ── 1) Einmaliges Laden + Parquet-Dump ───────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_all_data() -> tuple[dict[int,str], pd.DataFrame]:
