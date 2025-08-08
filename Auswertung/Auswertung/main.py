@@ -3,8 +3,7 @@ import streamlit as st
 import pandas as pd
 import os, base64
 from pathlib import Path
-
-BUS_MAP_FILE=Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
+BASE_DIR = Path(__file__).parent
 from funktionen_app import (
     BUS_TO_HERSTELLER,
     setup_page,
@@ -22,16 +21,17 @@ from funktionen_app import (
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pfade / Dateinamen
-RAW_SUMMARY    = "Zusammenfassung.xlsx"
-DATE_FILE      = "Zulassung-Verkauf.xlsx"
-PROCESSED_XLS  = "Zusammenfassung_bearbeitet.xlsx"
-PROCESSED_PQ   = "Zusammenfassung_bearbeitet.parquet"
-BUS_MAP_FILE   = "bus_hersteller_zuordnung.xlsx"
+# statt reiner Strings nun Path-Objekte
+RAW_SUMMARY   = BASE_DIR / "Zusammenfassung.xlsx"
+DATE_FILE     = BASE_DIR / "Zulassung-Verkauf.xlsx"
+PROCESSED_XLS = BASE_DIR / "Zusammenfassung_bearbeitet.xlsx"
+PROCESSED_PQ  = BASE_DIR / "Zusammenfassung_bearbeitet.parquet"
+BUS_MAP_FILE  = BASE_DIR / "bus_hersteller_zuordnung.xlsx"
 
 
 
 
-
+BUS_MAP_FILE=Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
 
 st.write("working dir:", os.getcwd())
 st.write("files here:", os.listdir())

@@ -659,7 +659,7 @@ def prepare_filtered_summary(
         )
         df_long["BusNr"] = df_long["BusNr"].astype(str).str.strip()
 
-        # Merge mit Zulassungs-/Verkaufsdaten
+        # Merge mit s-/Verkaufsdaten
         df_long = df_long.merge(
             df_dates[["BusNr","ZulassungDatum","VerkaufDatum"]],
             on="BusNr", how="left"
@@ -718,7 +718,7 @@ def get_data(path: str) -> pd.DataFrame:
     return df
 
 def _load_registration_dates(
-    date_path: str = "Zulassung-Verkauf.xlsx",
+    date_path = Path(__file__).parent/"Zulassung-Verkauf.xlsx",
     sheet_dates: int = 0
 ) -> pd.DataFrame:
     """
@@ -904,7 +904,7 @@ def plot_series_status_heatmap(
     
 def plot_status_heatmap(
     df_filt: pd.DataFrame,
-    date_path: str = "Zulassung-Verkauf.xlsx",
+    date_path = Path(__file__).parent/"Zulassung-Verkauf.xlsx",
     sheet_dates: int = 0
 ) -> None:
     """
@@ -1673,7 +1673,7 @@ def export_full_reports(
     df_filt: pd.DataFrame,
     bus_to_hersteller: dict,
     default_availability: float = 1.0,
-    date_path: str = "Zulassung-Verkauf.xlsx",
+    date_path = Path(__file__).parent/"Zulassung-Verkauf.xlsx",
     sheet_dates: int = 0
 ) -> None:
     import pandas as pd
