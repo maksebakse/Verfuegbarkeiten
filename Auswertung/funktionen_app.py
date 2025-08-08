@@ -1,7 +1,7 @@
 # app.py
 import os
 import pandas as pd
-from pathlib import Path
+
 BASE_DIR=os.path.dirname(__file__)
 EXCEL_PATH = os.path.join(BASE_DIR, "bus_hersteller_zuordnung.xlsx")
 
@@ -594,9 +594,9 @@ def setup_page(
 
 
 def prepare_filtered_summary(
-    summary_path:  str           = "Zusammenfassung.xlsx",
-    date_path:     str           = "Zulassung-Verkauf.xlsx",
-    output_path:   str           = "Zusammenfassung_bearbeitet.xlsx",
+    summary_path: Path = Path(__file__).parent / "Zusammenfassung.xlsx",
+    date_path:    Path = Path(__file__).parent / "Zulassung-Verkauf.xlsx",
+    output_path:  Path = Path(__file__).parent / "Zusammenfassung_bearbeitet.xlsx",
     sheet_dates                  = 0
 ) -> None:
     """
@@ -612,7 +612,7 @@ def prepare_filtered_summary(
     # Alte Ausgabe löschen
     if os.path.exists(output_path):
         os.remove(output_path)
-    BUS_MAP_FILE = PATH(__file__).parent / "bus_hersteller_zuordnung.xlsx"
+    BUS_MAP_FILE = Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
     mapping_df = pd.read_excel(BUS_MAP_FILE, engine="openpyxl")
     # Zulassungs-/Verkaufs-Daten einlesen
     df_dates = pd.read_excel(date_path, sheet_name=sheet_dates, engine="openpyxl")
