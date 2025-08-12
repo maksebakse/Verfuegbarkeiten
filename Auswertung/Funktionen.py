@@ -2,9 +2,10 @@
 import pandas as pd
 from io import BytesIO
 import plotly.express as px
+from pathlib import Path
 import numpy as np
 import streamlit as st
-
+from typing import Union
 # Farb-Schemata
 DISCRETE_SCHEMAS = {
     "Plotly": px.colors.qualitative.Plotly,
@@ -22,78 +23,120 @@ CONTINUOUS_SCHEMAS = {
     "Turbo":   px.colors.sequential.Turbo
 }
 
+RAW_SUMMARY   = "Zusammenfassung.xlsx"
+DATE_FILE     = "Zulassung-Verkauf.xlsx"
+PROCESSED_XLS = "Zusammenfassung_bearbeitet.xlsx"
+PROCESSED_PQ  = "Zusammenfassung_bearbeitet.parquet"
+BUS_MAP_FILE  = "bus_hersteller_zuordnung.xlsx"
 
-
-
-
-
-@st.cache_data
-def load_data(
-    summary_path: str,
-    date_path:    str
+def assign_series(
+    df: pd.DataFrame,
+    date_file: str,
+    sheet_name: Union[int, str] = 0,
+    col_busnr: str = "BusNr",
+    col_serie_orig: str = "Serie"
 ) -> pd.DataFrame:
     """
-    Lädt die Excelsheets 'Osten' und 'Moosach' aus summary_path,
-    wandelt sie ins Long-Format, füllt Nan-Werte, weist Ausfall-Typen
-    zu, und filtert anschliessend alle Zeilen, die vor der Zulassung
-    oder nach dem Verkauf liegen (gemäss date_path).
+    Mappt jede BusNr auf die Serie aus date_file und schreibt das in df[col_serie_orig].
+    Fehlende BusNr werden mit dem alten Wert oder "Unbekannt" gefüllt.
     """
-    # 1) Zulassungs-/Verkaufs-Daten einlesen und aufbereiten
-    df_dates = pd.read_excel(date_path, engine="openpyxl")
-    df_dates = df_dates.rename(columns={
-        "KOM-Nr.":       "BusNr",
-        "Einsatz":      "ZulassungDatum",
-        "Verkauf":      "VerkaufDatum"
-    })
-    # sicherstellen, dass BusNr als String vorliegt
-    df_dates["BusNr"] = df_dates["BusNr"].astype(str).str.strip()
-    df_dates["ZulassungDatum"] = pd.to_datetime(df_dates["ZulassungDatum"], errors="coerce")
-    df_dates["VerkaufDatum"]   = pd.to_datetime(df_dates["VerkaufDatum"],   errors="coerce")
-    
-    # 2) Deine bereits existierende Logik: Einlesen und Long-Format etc.
-    sheets = pd.read_excel(summary_path, sheet_name=["Osten","Moosach"], engine="openpyxl")
+    df_map = pd.read_excel(
+        date_file,
+        sheet_name=sheet_name,
+        usecols=["KOM-Nr.","Serie"],
+        engine="openpyxl"
+    )
+    df_map.columns = [col_busnr, "Serie_neu"]
+    df_map[col_busnr] = df_map[col_busnr].astype(str).str.strip()
+    bus_to_serie = df_map.set_index(col_busnr)["Serie_neu"].to_dict()
+
+    df = df.copy()
+    df[col_busnr] = df[col_busnr].astype(str).str.strip()
+    df["_serie_alt"] = df.get(col_serie_orig, pd.NA)
+    df[col_serie_orig] = df[col_busnr].map(bus_to_serie)
+    df[col_serie_orig] = (
+        df[col_serie_orig]
+          .fillna(df["_serie_alt"])
+          .fillna("Unbekannt")
+    )
+    return df.drop(columns=["_serie_alt"])
+
+
+
+
+def load_data(path: str, date_file: str = DATE_FILE, sheet_name: Union[int,str]=0) -> pd.DataFrame:
+    import pandas as pd
+    import numpy as np
+
+    sheets = pd.read_excel(path, sheet_name=["Osten","Moosach"])
     df_list = []
+
     for bereich, df in sheets.items():
         df = df.copy()
         df["Datum"] = pd.to_datetime(df["Datum"], dayfirst=True)
-        bus_cols = [c for c in df.columns if c!="Datum"]
+        bus_cols = [c for c in df.columns if c != "Datum"]
         df_long = df.melt(
-            id_vars="Datum",
+            id_vars=["Datum"],
             value_vars=bus_cols,
             var_name="Bus",
             value_name="Ausfallgrund"
         )
-        # … hier alle Deine Schritte 4–10 (NaN-Füllen, Typ zuweisen, Serie, Q, …)
-        # z.B.:
-        df_long["Ausfallgrund"] = df_long["Ausfallgrund"].replace("", np.nan).fillna("Keine Ausfälle")
-        df_long["BusNr"]        = df_long["Bus"].str.extract(r"(\d+)", expand=False).astype("Int64")
-        # … usw.
-        df_long["Bereich"] = bereich
-        df_list.append(df_long)
-    df_all = pd.concat(df_list, ignore_index=True)
-    
-    # 3) Jetzt den Merge mit Zulassungs-/Verkaufsdaten und Filtern
-    #    erst BusNr in beiden als String
-    df_all["BusNr"] = df_all["BusNr"].astype(str).str.strip()
-    df_merged = df_all.merge(
-        df_dates[["BusNr","ZulassungDatum","VerkaufDatum"]],
-        on="BusNr",
-        how="left"
-    )
-    # 4) Maske: Datum zwischen ZulassungDatum und VerkaufDatum (oder kein VerkaufDatum)
-    mask = (
-        (df_merged["Datum"] >= df_merged["ZulassungDatum"]) &
-        (
-            df_merged["VerkaufDatum"].isna() |
-            (df_merged["Datum"] <= df_merged["VerkaufDatum"])
+        # 1) Strings trimmen
+        df_long["Ausfallgrund"] = df_long["Ausfallgrund"].replace("", np.nan).str.strip()
+
+        # 2) Fehlende Grund → "Keine Ausfälle"
+        df_long["Ausfallgrund"] = df_long["Ausfallgrund"].fillna("Keine Ausfälle")
+
+        # 3) BusNr extrahieren
+        df_long["BusNr"] = df_long["Bus"].str.extract(r"(\d+)")[0].astype(int)
+
+        # 4) Ausfall-Typ
+        df_long["Ausfall-Typ"] = "Sonstiges"
+        # fahren
+        df_long.loc[df_long["Ausfallgrund"] == "Keine Ausfälle", "Ausfall-Typ"] = "Fahren"
+        # Standtage
+        df_long.loc[df_long["Ausfallgrund"].str.startswith(("St","st"), na=False), "Ausfall-Typ"] = "Standtage"
+        # Einrücker
+        df_long.loc[df_long["Ausfallgrund"].str.lower().str.startswith("e"),          "Ausfall-Typ"] = "Einrücker"
+        # alles übrige bleibt bei "Sonstiges"
+
+        # 5) Bool-Spalte Ausfall?
+        df_long["Ausfall"] = df_long["Ausfall-Typ"] != "Fahren"
+
+        # 6) Jetzt die Serie aus dem Date-Mapping ziehen
+        #    (anstatt 1–10,11–20…)
+        df_long = assign_series(
+            df_long,
+            date_file=date_file,
+            sheet_name=sheet_name,
+            col_busnr="BusNr",
+            col_serie_orig="Serie"
         )
-    ).fillna(False)
-    df_filtered = df_merged[mask].copy()
-    
-    # 5) Falls Du die Zusatsspalten nicht mehr brauchst, droppen:
-    df_filtered = df_filtered.drop(columns=["ZulassungDatum","VerkaufDatum"])
-    
-    return df_filtered
+
+        # 7) Quartal, Bereich
+        df_long["Jahr-Quartal"] = df_long["Datum"].dt.to_period("Q").astype(str)
+        df_long["Bereich"]      = bereich
+
+        df_list.append(df_long)
+
+    df_all = pd.concat(df_list, ignore_index=True)
+
+    # finale Sicherstellung, dass es keinen Aberranten gibt
+    df_all.loc[df_all["Ausfallgrund"] == "Keine Ausfälle", "Ausfall-Typ"] = "Fahren"
+    df_all["Ausfall"] = df_all["Ausfall-Typ"] != "Fahren"
+
+    return df_all
+
+
+
+
+
+
+
+
+
+
+
 
 
 def export_excel_with_charts(

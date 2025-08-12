@@ -3,7 +3,8 @@ import streamlit as st
 import pandas as pd
 import os, base64
 from pathlib import Path
-BASE_DIR = Path(__file__).parent
+
+BUS_MAP_FILE=Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
 from funktionen_app import (
     BUS_TO_HERSTELLER,
     setup_page,
@@ -21,34 +22,26 @@ from funktionen_app import (
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pfade / Dateinamen
-# statt reiner Strings nun Path-Objekte
-RAW_SUMMARY   = BASE_DIR / "Zusammenfassung.xlsx"
-DATE_FILE     = BASE_DIR / "Zulassung-Verkauf.xlsx"
-PROCESSED_XLS = BASE_DIR / "Zusammenfassung_bearbeitet.xlsx"
-PROCESSED_PQ  = BASE_DIR / "Zusammenfassung_bearbeitet.parquet"
-BUS_MAP_FILE  = BASE_DIR / "bus_hersteller_zuordnung.xlsx"
+RAW_SUMMARY    = "Zusammenfassung.xlsx"
+DATE_FILE      = "Zulassung-Verkauf.xlsx"
+PROCESSED_XLS  = "Zusammenfassung_bearbeitet.xlsx"
+PROCESSED_PQ   = "Zusammenfassung_bearbeitet.parquet"
+BUS_MAP_FILE   = "bus_hersteller_zuordnung.xlsx"
 
 
 
 
-BUS_MAP_FILE=Path(__file__).parent / "bus_hersteller_zuordnung.xlsx"
 
-st.write("working dir:", os.getcwd())
-st.write("files here:", os.listdir())
 
 # ── 1) Einmaliges Laden + Parquet-Dump ───────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_all_data() -> tuple[dict[int,str], pd.DataFrame]:
-    """
-    Lädt Bus→Hersteller, erzeugt ggf. die gefilterte XLSX,
-    liest sie ein (load_data via get_data) und schreibt einen Parquet-Dump.
-    """
     # 1. Bus→Hersteller
     df_map = pd.read_excel(BUS_MAP_FILE, engine="openpyxl")
     df_map.columns = ["BusNr","Hersteller"]
     bus_to_hersteller = df_map.set_index("BusNr")["Hersteller"].to_dict()
 
-    # 2. Gefilterte XLSX einmalig erzeugen
+    # 2. Excel einmalig neu anlegen
     if not Path(PROCESSED_XLS).exists():
         prepare_filtered_summary(
             summary_path=RAW_SUMMARY,
@@ -57,14 +50,15 @@ def load_all_data() -> tuple[dict[int,str], pd.DataFrame]:
             sheet_dates=0
         )
 
-    # 3. Parquet-Cache prüfen
+    # 3. Parquet‐Cache prüfen
     if Path(PROCESSED_PQ).exists():
         df = pd.read_parquet(PROCESSED_PQ)
     else:
-        # hier benutzen wir get_data → ruft intern load_data() auf
         df = get_data(PROCESSED_XLS)
-        # Parquet-Dump fürs nächste Mal
+        # hier noch mal Sicherstellung: Serie ist String 
+        df["Serie"] = df["Serie"].astype(str)
         df.to_parquet(PROCESSED_PQ, index=False)
+
     
     df_dates = pd.read_excel(DATE_FILE, engine="openpyxl", sheet_name=0)
     df_dates = df_dates.rename(columns={
@@ -107,11 +101,12 @@ def load_all_data() -> tuple[dict[int,str], pd.DataFrame]:
 # ── 2) Filter & KM-Berechnung cachen ─────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def filter_and_add_km_cached(df: pd.DataFrame, filt: dict):
-    """
-    Wrapper um Deine filter_and_add_km-Funktion, damit sie bei
-    gleichen Filtern nicht erneut rechnet.
-    """
-    return filter_and_add_km(df, filt)
+    # wandelt alle Listen in filt in Tupel um, damit sie hashable sind
+    filt_clean = {
+        k: tuple(v) if isinstance(v, list) else v
+        for k, v in filt.items()
+    }
+    return filter_and_add_km(df, filt_clean)
 
 
 # ── 3) DVD-Logo Helfer (optional) ────────────────────────────────────────────
@@ -147,6 +142,9 @@ def main():
     with st.spinner("✨ Initialisiere und lade Daten, einen Moment bitte…"):
         progress = st.sidebar.progress(0)
         bus_to_hersteller, df = load_all_data()
+        # sicherstellen, dass die Quartals-Spalte da ist
+        if "Jahr-Quartal" not in df.columns:
+            df["Jahr-Quartal"] = df["Datum"].dt.to_period("Q").astype(str)
         progress.progress(50)
         # falls Du später noch weitere DataFrames hast → progress.progress(…)
         progress.progress(100)

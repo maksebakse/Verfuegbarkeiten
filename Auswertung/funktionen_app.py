@@ -710,11 +710,28 @@ def prepare_filtered_summary(
     size = os.path.getsize(output_path)
     st.success(f"✅ Gefilterte Datei geschrieben: {output_path} ({size} Bytes)")
 # -----------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @st.cache_data
 def get_data(path: str) -> pd.DataFrame:
-    df = load_data(path)
-    # Stelle sicher, dass 'Datum' als datetime vorliegt
+    # path = Pfad zur bereits bearbeiteten Excel (prepare_filtered_summary)
+    df = load_data(path)  # date_path nutzt den Default DATE_FILE
     df["Datum"] = pd.to_datetime(df["Datum"])
+    # HIER: erzwinge String in Serie
+    if "Serie" in df.columns:
+        df["Serie"] = df["Serie"].astype(str)
     return df
 
 def _load_registration_dates(
@@ -746,7 +763,14 @@ def plot_series_status_heatmap(
     figsize: tuple = (16.53, 11.69),  # A3 Landscape in inches
     filename: str = None
 ) -> None:
-    # --- 1) Status-Spalte sicherstellen ---
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    from io import BytesIO
+    import streamlit as st
+
+    # 1) Kopie und Status-Spalte
     df = df_filt.copy()
     if "Status" not in df.columns:
         if "Ausfall-Typ" in df.columns:
@@ -757,12 +781,33 @@ def plot_series_status_heatmap(
             raise KeyError("df_filt muss 'Status' oder 'Ausfall-Typ' enthalten.")
     df["Datum"] = pd.to_datetime(df["Datum"])
 
-    # --- 2) Zulassungs-/Verkaufsdaten einlesen und filtern ---
+    # 2) Sicherstellen, dass df eine 'Serie'-Spalte hat
+    if "Serie" not in df.columns:
+        st.warning("Spalte 'Serie' fehlt im Filter-DF – versuche Remapping nach Serien…")
+        # wir versuchen, aus df_dates oder aus einem assign_series-Helper die Serie zu holen
+        try:
+            from Funktionen import assign_series
+            df = assign_series(
+                df,
+                date_file      = None,   # oder euer Pfad zur Zulassung-Verkauf-Datei
+                sheet_name     = 0,
+                col_busnr      = "BusNr",
+                col_serie_orig = "Serie"
+            )
+        except Exception as e:
+            st.error("Konnte Serie nicht neu zuordnen: " + str(e))
+            return
+        if "Serie" not in df.columns:
+            st.error("Spalte 'Serie' fehlt weiterhin nach Remapping.")
+            return
+
+    # 3) Zulassungs-/Verkaufsdaten
     dates = df_dates.copy()
-    dates["BusNr"] = dates["BusNr"].astype(str).str.strip()
+    dates["BusNr"]          = dates["BusNr"].astype(str).str.strip()
     dates["ZulassungDatum"] = pd.to_datetime(dates["ZulassungDatum"], errors="coerce")
     dates["VerkaufDatum"]   = pd.to_datetime(dates.get("VerkaufDatum"), errors="coerce")
 
+    # 4) Volle Matrix Bus × Datum erzeugen
     start, end = df["Datum"].min(), df["Datum"].max()
     all_dates  = pd.date_range(start, end, freq="D")
     buses = (
@@ -772,23 +817,36 @@ def plot_series_status_heatmap(
         .reset_index(drop=True)
     )
 
-    # Vollmatrix Bus×Datum
     full = (
         pd.MultiIndex
           .from_product([buses["BusNr"], all_dates], names=["BusNr","Datum"])
           .to_frame(index=False)
     )
+
+    # 5) Serie und Zulassungsdaten mergen
     full = full.merge(buses, on="BusNr", how="left")
     full = full.merge(dates, on="BusNr", how="left")
 
-    # Maske: nur Service-Tage (zwischen Zulassung und Verkauf)
+    # 6) Service-Maske
     mask_service = (
         (full["Datum"] >= full["ZulassungDatum"]) &
-        ((full["VerkaufDatum"].isna()) | (full["Datum"] <= full["VerkaufDatum"]))
+        (
+            full["VerkaufDatum"].isna() |
+            (full["Datum"] <= full["VerkaufDatum"])
+        )
     ).fillna(False)
-    full = full.loc[mask_service, ["BusNr","Datum","Serie"]]
 
-    # Merge mit dem echten Status (Ausfall / Fahren)
+    # 7) Auswahl der Spalten – mit Fallback, falls Serie doch fehlt
+    mini = full.loc[mask_service].copy()
+    if "Serie" not in mini.columns:
+        # letzte Rettung: Serie nach BusNr mappen
+        mini = mini.merge(buses, on="BusNr", how="left")
+        if "Serie" not in mini.columns:
+            st.error("Spalte 'Serie' konnte nicht rekonstruiert werden.")
+            return
+    full = mini[["BusNr","Datum","Serie"]]
+
+    # 8) Mit echtem Status joinen
     full = full.merge(
         df[["BusNr","Datum","Status"]],
         on=["BusNr","Datum"],
@@ -796,68 +854,53 @@ def plot_series_status_heatmap(
     )
     full["Status"] = full["Status"].fillna("Fahren")
 
-    # --- 3) Pivot mit pivot_table und Aggfunc ---
+    # 9) Pivot/Array erzeugen
     pivot = full.pivot_table(
         index="BusNr",
         columns="Datum",
         values="Status",
-        aggfunc="first"      # falls trotzdem Duplikate da sind, nimm den ersten
+        aggfunc="first"
     )
-
-    # Stelle sicher, dass die Zeilen in der Reihenfolge buses["BusNr"] stehen
+    # Busreihenfolge wie in 'buses'
     pivot = pivot.reindex(index=buses["BusNr"])
 
-    # Numerische Matrix: 0=Fahren, 1=Ausgefallen, NaN=kein Service
     Z = pivot.replace({"Fahren": 0, "Ausgefallen": 1}).astype(float).values
 
-    # --- 4) Bus→Serie Mapping in Pivot-Reihenfolge ---
+    # 10) Serien-Grenzen und Ticks
     bus_to_serie = buses.set_index("BusNr")["Serie"].to_dict()
-    series_per_row = [bus_to_serie[bus] for bus in pivot.index]
-
-    # Grenzen zwischen Serienblöcken finden
-    borders = [
-        i - 0.5
-        for i in range(1, len(series_per_row))
-        if series_per_row[i] != series_per_row[i-1]
-    ]
-
-    # Mittelpunkte für Y-Ticks je Serie
-    tick_pos   = []
-    tick_label = []
+    series_per_row = [bus_to_serie[b] for b in pivot.index]
+    borders = [i-0.5 for i in range(1,len(series_per_row)) if series_per_row[i]!=series_per_row[i-1]]
+    tick_pos, tick_lbl = [], []
     start_i = 0
     for i in range(1, len(series_per_row)+1):
         end_i = i-1
-        if (i == len(series_per_row)) or (series_per_row[i] != series_per_row[i-1]):
-            center = (start_i + end_i) / 2
-            tick_pos.append(center)
-            tick_label.append(series_per_row[end_i])
+        if (i==len(series_per_row)) or (series_per_row[i]!=series_per_row[i-1]):
+            tick_pos.append((start_i+end_i)/2)
+            tick_lbl.append(series_per_row[end_i])
             start_i = i
 
-    # --- 5) Plot auf A3-Größe ---
+    # 11) Plot
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    cmap = ListedColormap(["#00AA00", "#DD3333"])
-    cmap.set_bad(color="#EEEEEE")  # Service-loses → hellgrau
+    cmap = ListedColormap(["#00AA00","#DD3333"])
+    cmap.set_bad(color="#EEEEEE")
     ax.imshow(Z, aspect="auto", cmap=cmap, origin="lower")
 
-    # Y-Linien zwischen Serien
     for y in borders:
         ax.axhline(y=y, color="white", linewidth=2)
 
     ax.set_yticks(tick_pos)
-    ax.set_yticklabels(tick_label, fontsize=8)
+    ax.set_yticklabels(tick_lbl, fontsize=8)
     ax.set_ylabel("Serie")
 
-    # --- 6) Monats- & Jahreslinien auf X ---
-    dates_idx    = pivot.columns
-    month_bounds = [i for i, d in enumerate(dates_idx) if d.day == 1]
-    year_bounds  = [i for i, d in enumerate(dates_idx) if (d.day == 1 and d.month == 1)]
-
+    # Monats-/Jahreslinien
+    dates_idx   = pivot.columns
+    month_bounds = [i for i,d in enumerate(dates_idx) if d.day==1]
+    year_bounds  = [i for i,d in enumerate(dates_idx) if (d.day==1 and d.month==1)]
     for mb in month_bounds:
         ax.axvline(x=mb-0.5, color="white", linewidth=0.8)
     for yb in year_bounds:
         ax.axvline(x=yb-0.5, color="black", linewidth=1.5)
 
-    # X-Ticks nur an Monatsanfängen
     ax.set_xticks(month_bounds)
     labels = []
     for idx in month_bounds:
@@ -869,29 +912,23 @@ def plot_series_status_heatmap(
     ax.set_xticklabels(labels, rotation=90, fontsize=7)
     ax.set_xlabel("Monat / Jahr")
 
-    # --- 7) Legende ---
+    # Legende
     from matplotlib.patches import Patch
     legend_handles = [
         Patch(facecolor="#00AA00", label="Fahren"),
         Patch(facecolor="#DD3333", label="Ausgefallen"),
         Patch(facecolor="#EEEEEE", label="kein Service")
     ]
-    ax.legend(
-        handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(1.01, 1),
-        fontsize=8
-    )
+    ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.01,1), fontsize=8)
 
     ax.set_title(
         f"Status-Heatmap (grün=Fahren, rot=Ausgefallen)\n"
         f"Zeitraum: {dates_idx[0].date()} – {dates_idx[-1].date()}",
-        fontsize=10,
-        pad=12
+        fontsize=10, pad=12
     )
     plt.tight_layout()
 
-    # --- 8) Speichern und in Streamlit ausgeben ---
+    # 12) Ausgabe
     if filename:
         fig.savefig(filename, dpi=dpi)
     buf = BytesIO()
@@ -1011,6 +1048,9 @@ def plot_status_heatmap(
 # 3) Sidebar‐Filter – Pflicht‐Multiselects leer, st.stop() bei keiner Auswahl
 # -----------------------------------------------------------------------------
 def sidebar_filters(df: pd.DataFrame) -> Dict[str, Any]:
+    import pandas as pd
+    import streamlit as st
+
     st.sidebar.markdown("## 🔎 Filter")
 
     # — 1) Zeit-Filter (Datum vs. Quartal) —
@@ -1043,7 +1083,8 @@ def sidebar_filters(df: pd.DataFrame) -> Dict[str, Any]:
     # — 3) Filter nach Busnummer / Busserie / Hersteller —
     buswahl = st.sidebar.radio("Filter nach", ["Busnummer", "Busserie", "Hersteller"], index=0)
     if buswahl == "Busnummer":
-        all_buses = st.sidebar.checkbox("Alle Busnummern auswählen", key="all_buses")
+        # Checkbox default auf True
+        all_buses = st.sidebar.checkbox("Alle Busnummern auswählen", value=True, key="all_buses")
         bus_options = sorted(df["BusNr"].unique())
         default_buses = bus_options if all_buses else []
         busnr = st.sidebar.multiselect("Busnummer(n)", options=bus_options, default=default_buses)
@@ -1060,7 +1101,8 @@ def sidebar_filters(df: pd.DataFrame) -> Dict[str, Any]:
             st.sidebar.info("Bitte wähle mindestens eine Serie aus.")
             st.stop()
     else:
-        all_hers = st.sidebar.checkbox("Alle Hersteller auswählen", key="all_hers")
+        # Hersteller default auf alle
+        all_hers = st.sidebar.checkbox("Alle Hersteller auswählen", value=True, key="all_hers")
         hers_opts = sorted(df["Hersteller"].unique())
         default_hers = hers_opts if all_hers else []
         hersteller = st.sidebar.multiselect("Hersteller", options=hers_opts, default=default_hers)
@@ -1077,20 +1119,17 @@ def sidebar_filters(df: pd.DataFrame) -> Dict[str, Any]:
         default=["Standtage", "Einrücker", "Sonstiges", "Fahren"]
     )
 
-    # — 5) Auswahl-Context zum Einschränken der Ausfallgrund‐Optionen vorbereiten —
-    #    Wir erstellen eine Maske genau wie in filter_and_add_km, ohne km‐Spalten:
+    # — 5) Kontext für Ausfallgrund–Filter erstellen —
     df_opt = df.copy()
     mask = pd.Series(True, index=df_opt.index)
 
-    # 5A) Zeit-Filter
+    # 5A Zeit
     if datum_start is not None and datum_ende is not None:
-        start = pd.to_datetime(datum_start)
-        ende  = pd.to_datetime(datum_ende)
-        mask &= (df_opt["Datum"] >= start) & (df_opt["Datum"] <= ende)
+        mask &= (df_opt["Datum"] >= pd.to_datetime(datum_start)) & (df_opt["Datum"] <= pd.to_datetime(datum_ende))
     else:
         mask &= df_opt["Jahr-Quartal"].isin(quartal)
 
-    # 5B) Bus-Filter
+    # 5B Bus/Serie/Hersteller
     if busnr:
         mask &= df_opt["BusNr"].isin(busnr)
     elif serie:
@@ -1098,40 +1137,43 @@ def sidebar_filters(df: pd.DataFrame) -> Dict[str, Any]:
     elif hersteller:
         mask &= df_opt["Hersteller"].isin(hersteller)
 
-    # 5C) Ausfall-Typ
+    # 5C Ausfall-Typ
     if "Ausfall-Typ" in df_opt.columns and typ:
         mask &= df_opt["Ausfall-Typ"].isin(typ)
 
     df_opt = df_opt[mask]
 
-    # — 6) Ausfallgrund(e) mit Häufigkeit in Klammern —
-    if "Ausfallgrund" not in df_opt.columns or df_opt["Ausfallgrund"].dropna().empty:
-        st.sidebar.info("Keine Ausfallgründe vorhanden für die gewählten Filter.")
+    # — 6) Ausfallgrund(e) mit Häufigkeit, exkl. "Keine Ausfälle" —
+    #    wir blenden "Keine Ausfälle" komplett aus, damit der User nicht nur diesen einen
+    #    Grund wählen und anschließend nichts in der Analyse sehen kann.
+    if "Ausfallgrund" not in df_opt.columns:
+        st.sidebar.info("Spalte 'Ausfallgrund' fehlt in den Daten!")
         selected_gr = []
         label_to_gr = {}
     else:
-        # Häufigkeiten berechnen
-        gr_counts = df_opt["Ausfallgrund"].value_counts(dropna=True)
-        # Labels "Grund (N)"
-        options = [f"{gr} ({gr_counts[gr]})" for gr in gr_counts.index]
-        # Mapping zurück auf den Original–Grund
-        label_to_gr = {opt: gr for opt, gr in zip(options, gr_counts.index)}
-        # Multiselect
-        selected_labels = st.sidebar.multiselect(
-            "Ausfallgrund(e) auswählen",
-            options=options,
-            default=options
-        )
-        # zurückübersetzen
-        selected_gr = [label_to_gr[label] for label in selected_labels]
+        # echte Ausfallgründe
+        df_opt = df_opt[df_opt["Ausfallgrund"] != "Keine Ausfälle"]
+        if df_opt["Ausfallgrund"].empty:
+            st.sidebar.info("Keine Ausfallgründe vorhanden für die gewählten Filter.")
+            selected_gr = []
+            label_to_gr = {}
+        else:
+            gr_counts = df_opt["Ausfallgrund"].value_counts(dropna=True)
+            options = [f"{gr} ({gr_counts[gr]})" for gr in gr_counts.index]
+            label_to_gr = {opt: gr for opt, gr in zip(options, gr_counts.index)}
+            selected_labels = st.sidebar.multiselect(
+                "Ausfallgrund(e) auswählen",
+                options=options,
+                default=options
+            )
+            selected_gr = [label_to_gr[label] for label in selected_labels]
 
-    # — 7) Restliche Sidebar‐Einstellungen —
+    # — 7) Sonstige Sidebar‐Widgets —
     top_n         = st.sidebar.slider("Top N Ausfallgründe im Pie", 3, 15, 7)
     zeit_gruppe   = st.sidebar.radio("Zeit gruppieren nach", ["Täglich", "Wöchentlich", "Monatlich"])
     ts_typ        = st.sidebar.selectbox("Typ Zeitreihe", ["Linie", "Fläche", "Balken"])
     diskret       = st.sidebar.selectbox("Diskretes Farbschema", list(DISCRETE_SCHEMAS.keys()), index=0)
-    kontinuierlich = st.sidebar.selectbox("Kontinuierliches Farbschema", list(CONTINUOUS_SCHEMAS.keys()), index=0)
-
+    kontinuierlich= st.sidebar.selectbox("Kontinuierliches Farbschema", list(CONTINUOUS_SCHEMAS.keys()), index=0)
     st.sidebar.markdown("## ⚙️ Standard-Kilometer pro Typ")
     einr_km   = st.sidebar.number_input("Default km Einrücker",  min_value=0, value=50,  step=10)
     stand_km  = st.sidebar.number_input("Default km Standtage",  min_value=0, value=0,   step=10)
@@ -1164,15 +1206,12 @@ def filter_and_add_km(
     df: pd.DataFrame,
     filt: Dict[str, Any]
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Filtert das DataFrame nach Datum/Quartal, BusNr/Serie/Hersteller und Ausfall-Typ.
-    Fügt die km-Spalten hinzu (km_default, km_fahren, km).
-    Entfernt nicht mehr Tage vor dem ersten Ausfall.
-    """
+    import pandas as pd
+
     df2 = df.copy()
     mask = pd.Series(True, index=df2.index)
 
-    # 1) Status-Spalte sicherstellen
+    # 1) Status-Spalte sicherstellen (Fahren/Ausgefallen): unverändert
     if "Status" not in df2.columns:
         if "Ausfall-Typ" in df2.columns:
             df2["Status"] = df2["Ausfall-Typ"].apply(
@@ -1181,7 +1220,7 @@ def filter_and_add_km(
         else:
             raise KeyError("Weder 'Status' noch 'Ausfall-Typ' in den Daten gefunden.")
 
-    # 2) Filter Datum oder Quartal
+    # 2) Zeit-Filter
     if filt["datum_start"] and filt["datum_ende"]:
         start = pd.to_datetime(filt["datum_start"])
         ende  = pd.to_datetime(filt["datum_ende"])
@@ -1189,7 +1228,7 @@ def filter_and_add_km(
     else:
         mask &= df2["Jahr-Quartal"].isin(filt["quartal"])
 
-    # 3) Filter BusNr / Serie / Hersteller
+    # 3) Bus-Filter
     if filt["busnr"]:
         mask &= df2["BusNr"].isin(filt["busnr"])
     elif filt["serie"]:
@@ -1197,21 +1236,25 @@ def filter_and_add_km(
     elif filt["hersteller"]:
         mask &= df2["Hersteller"].isin(filt["hersteller"])
 
-    # 4) Filter Ausfall-Typ
-    if "Ausfall-Typ" in df2.columns and filt["typ"]:
-        mask &= df2["Ausfall-Typ"].isin(filt["typ"])
+    # 4) Ausfall-Typ (jetzt immer anwenden – leere Liste → keine Treffer)
+    mask &= df2["Ausfall-Typ"].isin(filt["typ"])
 
-    # 5) Anwenden aller Filter
+    # 5) Ausfallgrund (immer anwenden – leere Liste → keine Treffer)
+    mask &= df2["Ausfallgrund"].isin(filt["ausfallgrund"])
+
+    # 6) Filter anwenden
     df_filt = df2[mask].copy()
 
-    # 6) km-Logik
+    # 7) "Keine Ausfälle" rausfliegen lassen
     if "Ausfallgrund" in df_filt.columns:
         df_filt = df_filt[df_filt["Ausfallgrund"] != "Keine Ausfälle"]
+
+    # 8) km-Logik wie gehabt
     df_filt["km_default"] = df_filt["Ausfall-Typ"].map(filt["km_defaults"])
     df_filt["km_fahren"]  = filt["km_fahren"]
     df_filt["km"]         = df_filt["km_default"]
 
-    # Für die KM-Auswertung behalten wir eine Kopie
+    # für KM-Tab
     df_km = df_filt.copy()
     return df_filt, df_km
 
